@@ -3,6 +3,7 @@ use std::{fs::File, path::Path};
 use memmap2::Mmap;
 
 use crate::parser::partitions::{self, Partition, PartitionTable, is_filesystem_partition};
+use crate::parser::superblock::{SUPERBLOCK_SIZE, SuperBlock};
 
 pub fn parse_qnx6(image_path: &Path) -> Result<PartitionTable, String> {
     let file = File::open(image_path).map_err(|error| {
@@ -40,6 +41,24 @@ fn parse_partition(image: &[u8], partition: &Partition) -> Result<(), String> {
     }
 
     println!("partition {}", partition.index);
+    let start_sector = partition.first_lba;
+    let offset_into_partition = 16;
+    let target_sector = start_sector
+        .checked_add(offset_into_partition)
+        .ok_or_else(|| format!("partition {} superblock sector overflowed", partition.index))?;
+    let superblock_offset = target_sector
+        .checked_mul(512)
+        .ok_or_else(|| format!("partition {} superblock offset overflowed", partition.index))?;
+    let superblock_start = usize::try_from(superblock_offset).map_err(|_| {
+        format!(
+            "partition {} superblock offset is too large: {}",
+            partition.index, superblock_offset
+        )
+    })?;
+    let superblock_end = superblock_start
+        .checked_add(SUPERBLOCK_SIZE)
+        .ok_or_else(|| format!("partition {} superblock range overflowed", partition.index))?;
+
     println!(
         "  before: type={}, first_lba={}, sectors={}, byte_offset={}, byte_len={}",
         partition.partition_type,
@@ -67,9 +86,18 @@ fn parse_partition(image: &[u8], partition: &Partition) -> Result<(), String> {
     let partition_bytes = image
         .get(start..end)
         .ok_or_else(|| format!("partition {} extends past end of image", partition.index))?;
+    let superblock_bytes = image.get(superblock_start..superblock_end).ok_or_else(|| {
+        format!(
+            "partition {} superblock extends past end of image",
+            partition.index
+        )
+    })?;
+    let superblock = SuperBlock::parse(superblock_bytes)?;
 
     println!("  after: filesystem=true");
     println!("  action: parsing partition{}", partition.index);
+    println!("  superblock_offset: {}", superblock_offset);
+    println!("  superblock: {}", superblock);
     println!("  bytes_available: {}", partition_bytes.len());
     println!();
 
